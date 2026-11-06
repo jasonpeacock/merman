@@ -133,7 +133,7 @@ const showsImages = async ($: EngineInterface): Promise<boolean> => {
 }
 
 type Latex = { command: string; dir: string }
-type LatexSession = { style: Style; color: string; pending: Set<string>; wanted: Set<string>; batch: string[]; engine?: Promise<Latex | null>; ready?: Latex | null; stopped?: boolean; queue: Promise<void> }
+type LatexSession = { style: Style; color: string; pending: Set<string>; wanted: Set<string>; batch: (readonly [string, string])[]; engine?: Promise<Latex | null>; ready?: Latex | null; stopped?: boolean; queue: Promise<void> }
 
 const formulaKey = (color: string, tex: string) => `${color}\0${tex}`
 
@@ -187,7 +187,8 @@ const stopLatex = (latex: LatexSession) => {
   latex.batch = []
 }
 
-const typesetLater = async ($: EngineInterface, latex: LatexSession, texs: string[]): Promise<void> => {
+const typesetLater = async ($: EngineInterface, latex: LatexSession, batch: (readonly [string, string])[]): Promise<void> => {
+  const texs = batch.map(([, tex]) => tex)
   const color = latex.color
   const engine = await latexEngine($, latex)
   if (!engine || latex.stopped) return
@@ -199,7 +200,10 @@ const typesetLater = async ($: EngineInterface, latex: LatexSession, texs: strin
   const fresh = texs.map((tex, i) => [formulaKey(color, tex), results[i]!] as const)
   await update($, formulas, store => keepFormulas(store as Record<string, Formula>, fresh, latex.wanted, formulaBytes))
   latex.wanted.clear()
-  for (const tex of texs) latex.pending.delete(formulaKey(color, tex))
+  for (const [queued, tex] of batch) {
+    latex.pending.delete(queued)
+    latex.pending.delete(formulaKey(color, tex))
+  }
 }
 
 const mathOfBlocks = async ($: EngineInterface, latex: LatexSession, surface: string, blocks: Block[]): Promise<Map<number, Typeset>> => {
@@ -216,14 +220,14 @@ const mathOfBlocks = async ($: EngineInterface, latex: LatexSession, surface: st
   if (missing.length) {
     if (latex.batch.length === 0) {
       $.clock.after(0, () => {
-        const texs = latex.batch
+        const batch = latex.batch
         latex.batch = []
-        latex.queue = latex.queue.then(() => typesetLater($, latex, texs)).catch(() => stopLatex(latex))
+        latex.queue = latex.queue.then(() => typesetLater($, latex, batch)).catch(() => stopLatex(latex))
       })
     }
     for (const [key, tex] of missing) {
       latex.pending.add(key)
-      latex.batch.push(tex)
+      latex.batch.push([key, tex])
     }
   }
   return new Map(maths.flatMap(({ i, tex, key }) => {
@@ -614,7 +618,10 @@ const setTheme = async ($: EngineInterface, picked: Picked, name: string): Promi
   const others = RANDOM_THEMES.filter(t => t !== picked.theme)
   picked.theme = others[Math.floor(Math.random() * others.length)]!
   const style = picked.latex.style
-  style.theme = resolveStyle({ ...picked.options, theme: picked.theme }).theme
+  const next = resolveStyle({ ...picked.options, theme: picked.theme })
+  style.theme = next.theme
+  if (next.background) style.background = next.background
+  else delete style.background
   picked.latex.color = ratexColor(style.theme.diagramText ?? style.theme.codeText ?? '#808080')
   picked.charts.config = diagramConfig(style)
   $.ui.invalidate('ui.render')
@@ -1025,7 +1032,7 @@ export const register: Register = (on, options) => {
     const own = kind === 'composer' || kind === 'bridge' || (kind === 'unclassified' && !e.props.from && !e.props.task)
     if (!own) return next(e)
     const at = style.clock === 'off' ? undefined : sentAt(await read($, sent), e.props.text, await firstDrawn($, e.requestId))
-    const time = at === undefined ? undefined : clockText(at, await $.clock.now(), style.clock)
+    const time = at === undefined ? undefined : clockText(at, await $.clock.now(), style.clock, style.timeZone)
     if (style.promptStyle === 'off') return time === undefined ? next(e) : next({ ...e, props: { ...e.props, text: `[${time}] ${e.props.text}` } })
     const el = $.ui.resolve(e)
     const reach = await linkReach($, probes, style)
